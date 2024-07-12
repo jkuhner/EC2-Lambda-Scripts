@@ -80,13 +80,20 @@ mainSteps:
         
       #This function executes all tasks stated within
         function Start-BootstrapTasks {
+
+      # Domain Join Section
+      # ============================================
+
+      # Setup the variables that are used for the Domain Join section of this script.
             [String]$Domain = "<Domain you want to join the server to>"
             [String]$DnsServer = "<address of the DNS server that you want assigned to the server>"
             [String]$UserName = "<put the Domain account you will use here to join the server to the Domain"
             [String]$S3BucketName = "<Name of the S3 Bucket where the Key and File are stored with the encrypted Credentials>"
             [String]$PasswordFile = "<Name of the password file>"
             [String]$Key1 = "<Name of the first key file>"
-            [String]$Key2 = "<Name of the second key file>"
+            [String]$Key2 = "<Path to and Name of the second key file>"
+            [String]$OUPath = "<Fully Qualified OU Path where the server needs to be placed for Group Policy to be properly applyed>"
+            [String]$ErrorLog = "<Path and file name for error logs>"
 
       # IF statement checks for domain membership and proceeds to join instance to the domain
             If ((Get-WmiObject -Class Win32_ComputerSystem).Domain -ne $Domain)
@@ -101,14 +108,16 @@ mainSteps:
                 
                 # Pass Domain Creds
                 # The Domain credentials are encrypted following this guide https://www.altaro.com/msp-dojo/encrypt-password-powershell/
-                # One Key and the Password file are stored in an S3 Bucket. The other Key file is stored on teh server image.
+                # One Key and the Password file are stored in an S3 Bucket. The other Key file is stored on the server image.
                 # This was a personal choice so that all the peices were never in the same place.
-                $File = read-s3object -bucketname phc-ec2-domain-join -key ec2.txt -file ec2.txt -region us-west-1
-                $password = Get-Content $File | ConvertTo-SecureString -Key (Get-Content C:\Tools\join.txt)
-                $cred = New-Object -typename System.Management.Automation.PSCredential($username, $password)
-                
-      #Setup the new name for the server
-                $TDate = get-date
+                $File = read-s3object -bucketname $S3BucketName -key $Key1 -file $Key1 -region us-west-1
+                $Password = Get-Content $File | ConvertTo-SecureString -Key (Get-Content $Key2)
+                $Cred = New-Object -typename System.Management.Automation.PSCredential($UserName, $Password)
+
+      # To join the server to the Domain, a unique name is needed.  This was our solution.
+      # It creates a name that is unique, even if several servers are spinning up on the ASG at the same time.
+      # Setup the new name for the server
+                $TDate = Get-Date
                 $Hour = ($TDate.Hour).ToString()
                 $Day = ($TDate.Day).ToString()
                 $Month = ($TDate.Month).ToString()
@@ -117,36 +126,47 @@ mainSteps:
                 $Mili = ($TDate.Millisecond).ToString()
                 $NewName = "SH" + $Month + $Day + $Hour + $Minute + $Second + $Mili
                 
-      #Adding to domain
+      # Adding to Domain
                 Try 
                 {
+                    # Check to see if the server has already been renamed.  the default name for EC2 instances
+                    # at the time of this script was "EC2AMAZ-" and some randon letters and numbers.  If the name has not been changed
+                    # yet, change it, then join it to the Domain.
                     If ($env:COMPUTERNAME -like "EC2AMAZ*") 
                     {   
                         Rename-Computer -NewName $NewName -Force
                     
                     }
        else{
-                        Add-Computer -DomainName phc.local -OUPath "OU=CallCenter,OU=AWS-RDS,OU=Servers,DC=PHC,DC=local" -Credential $cred -Force -erroraction 'stop'
+                        Add-Computer -DomainName #Domain -OUPath $OUPath -Credential $Cred -Force -erroraction 'stop'
               }
                 }
                 
       #Get Error messages in a file
                 Catch{
-                echo $_.Exception | Out-File c:\tools\error-joindomain.txt -Append
+                echo $_.Exception | Out-File $ErrorLog -Append
                 }
-                
-      #Clear STATIC DNS settings so that new dynamic addresses can populate
+
+      # This removes the static DNS entry that we set earlier so that AWS DHCP can apply the normal DNS that the server should use.
+      # Clear STATIC DNS settings so that new dynamic addresses can populate
                 Set-DNSClientServerAddress -interfaceAlias $Eth -ResetServerAddresses
 
-      #Exit 3010 initiates a reboot and records where it left off and resumes there after booting
+      # Exit 3010 initiates a reboot and records where it left off and resumes there after booting
                 exit 3010
             }
 
+      # Finish configuration section
+      # ============================================================
 
-      #IF statement checks for membership of the awsrdsservice account (account which will manage #the amazonssmagent service) in the LOCAL Administrators group and proceeds to add it If #needed             
-            If ((get-LocalGroupMember -Group Administrators -Member phc\awsrdsservice -ErrorAction SilentlyContinue).name -ne "phc\awsrdsservice")
+      # Setup Variables that will be used in the Finish configuration section
+          [String]$ServiceAccount = "<Name of domain account that will run the AWS SSM Service>"
+
+      # A Domian Service account is needed for the SSM service as the script is run in the context of the service user.
+      # If the user has no permissions to add a server to the RDS farm, then the script will fail.
+      #  IF statement checks for membership of the awsrdsservice account (account which will manage #the amazonssmagent service) in the LOCAL Administrators group and proceeds to add it If #needed             
+            If ((get-LocalGroupMember -Group Administrators -Member $ServiceAccount -ErrorAction SilentlyContinue).name -ne "phc\awsrdsservice")
             {
-                Add-LocalGroupMember -Group Administrators -Member phc\awsrdsservice
+                Add-LocalGroupMember -Group Administrators -Member $ServiceAccount
             }
             
       #IF Statement sets the service account that manages the amazonssmagent to the account that #was just added to the administrators group and needed to execute administrative tasks as #instructed by Aws Systems Manager via the agent
