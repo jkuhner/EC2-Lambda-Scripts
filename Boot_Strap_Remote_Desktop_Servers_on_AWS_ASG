@@ -1,3 +1,20 @@
+# *********************************************************************
+#	Script Name:	Bootstrap.yml
+#	Written By :	Jeff Kuhner, Mac Sauceda
+#	Date Written:	12\10\2022
+# Description:	This script is used to bring up Remote Desktop Services (RDS) hosts on an AWS ASG (Auto Scale Group).
+#                Use this in a Lifecycle hook to join the device to the desired domain, name it with a unique name,
+#                join it to the RDS deployment, and add it to the Published Application or Desktop of your choice.
+#                The YAML is used as a wrapper for a Powershell script that does the heavey lifting.  Both YAML and Powershell
+#                are required to make this work.  The YAML code does snot need any modification to function in a new environment.
+#                The Powershell will need some variables modified to suit your environment.  The comment bellow (Line 27) explains the 
+#                restraints and requirements for the Powrshell script to be acknowledged properly as Powershell.
+#                It uses YAML Block Scalar.  Search your favorite YAML site for an explanation of Block Scalar.
+#	Requirements:	AWS ASG with Lifecycle Hooks. AWS SSM (System Manager).  This code copied into an SSM Document.
+
+# *********************************************************************
+
+
 #The Schema version must be 2.2 as it is relative to the language/document/template type #referenced
 schemaVersion: "2.2"
 description: "Sample instance bootstrap and send CompleteLifeCycleAction signal."
@@ -9,6 +26,8 @@ mainSteps:
 
 #The “-|” referenced below is 1.2 YAML Block Scalar and allows us to type LITERAL powershell code after it so long as EVERYTHING!!! is indented beyond the pipe character “|” below, alleviating any yaml syntax errors that may arise from entering powershell code within yaml code/construct
     - |  
+
+      # If a valiable is listed below that does not appear to be defined in the script, it is passed in automatically by the LifeCyle Hook and must not be changed.
 
       #This function returns instance metadata
         function Get-InstanceMetadata {
@@ -61,16 +80,29 @@ mainSteps:
         
       #This function executes all tasks stated within
         function Start-BootstrapTasks {
+            [String]$Domain = "<Domain you want to join the server to>"
+            [String]$DnsServer = "<address of the DNS server that you want assigned to the server>"
+            [String]$UserName = "<put the Domain account you will use here to join the server to the Domain"
+            [String]$S3BucketName = "<Name of the S3 Bucket where the Key and File are stored with the encrypted Credentials>"
+            [String]$PasswordFile = "<Name of the password file>"
+            [String]$Key1 = "<Name of the first key file>"
+            [String]$Key2 = "<Name of the second key file>"
 
-      #IF statement checks for domain membership and proceeds to join instance to the domain
-            If ((Get-WmiObject -Class Win32_ComputerSystem).Domain -ne "phc.local")
+      # IF statement checks for domain membership and proceeds to join instance to the domain
+            If ((Get-WmiObject -Class Win32_ComputerSystem).Domain -ne $Domain)
             {
+                # Set Execution Policy for this run to Unrestricted
                 Set-ExecutionPolicy unrestricted -Force
+
+                # Get the ENI of the EC2 Instance and set the DNS Server for the Instance.  The DNS server in
+                # case was the Domain COntroller that we wanted the server to use to join the Domain.
                 $Eth = Get-NetAdapter | where {$_.ifDesc -notlike "TAP*"} | foreach InterfaceAlias | select -First 1
-                Set-DNSClientServerAddress -interfaceAlias $Eth -ServerAddresses  ("10.222.48.43")
+                Set-DNSClientServerAddress -interfaceAlias $Eth -ServerAddresses  ($DnsServer)
                 
-                #Pass Domain Creds
-                $username = "phc\ec2domainjoin"
+                # Pass Domain Creds
+                # The Domain credentials are encrypted following this guide https://www.altaro.com/msp-dojo/encrypt-password-powershell/
+                # One Key and the Password file are stored in an S3 Bucket. The other Key file is stored on teh server image.
+                # This was a personal choice so that all the peices were never in the same place.
                 $File = read-s3object -bucketname phc-ec2-domain-join -key ec2.txt -file ec2.txt -region us-west-1
                 $password = Get-Content $File | ConvertTo-SecureString -Key (Get-Content C:\Tools\join.txt)
                 $cred = New-Object -typename System.Management.Automation.PSCredential($username, $password)
